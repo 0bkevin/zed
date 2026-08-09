@@ -1001,26 +1001,11 @@ impl Clipboard {
         {
             return self.set_text(Cow::Owned(text.text().to_owned()), selection, wait);
         }
-        let mut data = Vec::new();
-        for entry in item.entries() {
-            match entry {
-                ClipboardEntry::String(text) => data.push(ClipboardData {
-                    bytes: text.text().as_bytes().to_owned(),
-                    format: self.inner.atoms.UTF8_STRING,
-                }),
-                ClipboardEntry::Html(html) => data.push(ClipboardData {
-                    bytes: html.as_bytes().to_owned(),
-                    format: self.inner.atoms.HTML_MIME,
-                }),
-                ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_) => {}
-            }
-        }
-        if data.is_empty() {
-            data.push(ClipboardData {
-                bytes: Vec::new(),
-                format: self.inner.atoms.UTF8_STRING,
-            });
-        }
+        let data = clipboard_data_for_item(
+            item,
+            self.inner.atoms.UTF8_STRING,
+            self.inner.atoms.HTML_MIME,
+        );
         self.inner.write(data, selection, wait)
     }
 
@@ -1104,6 +1089,67 @@ impl Clipboard {
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {
         self.inner.is_owner(selection).unwrap_or(false)
+    }
+}
+
+fn clipboard_data_for_item(
+    item: &ClipboardItem,
+    text_format: Atom,
+    html_format: Atom,
+) -> Vec<ClipboardData> {
+    let mut data = vec![ClipboardData {
+        bytes: item.text().unwrap_or_default().into_bytes(),
+        format: text_format,
+    }];
+    if let Some(html) = item.html() {
+        data.push(ClipboardData {
+            bytes: html.as_bytes().to_owned(),
+            format: html_format,
+        });
+    }
+    data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{ClipboardEntry, ClipboardString, ExternalPaths};
+    use std::path::PathBuf;
+
+    #[test]
+    fn clipboard_data_preserves_plain_text_and_html_representations() {
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::String(ClipboardString::new("first".into())),
+                ClipboardEntry::Html("<strong>rich</strong>".into()),
+                ClipboardEntry::String(ClipboardString::new("second".into())),
+            ],
+        };
+
+        let data = clipboard_data_for_item(&item, 1, 2);
+
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0].format, 1);
+        assert_eq!(data[0].bytes, b"firstsecond");
+        assert_eq!(data[1].format, 2);
+        assert_eq!(data[1].bytes, b"<strong>rich</strong>");
+    }
+
+    #[test]
+    fn clipboard_data_preserves_external_path_text_fallback() {
+        let item = ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(ExternalPaths(
+                [PathBuf::from("/tmp/first"), PathBuf::from("/tmp/second")]
+                    .into_iter()
+                    .collect(),
+            ))],
+        };
+
+        let data = clipboard_data_for_item(&item, 1, 2);
+
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].format, 1);
+        assert_eq!(data[0].bytes, b"/tmp/first/tmp/second");
     }
 }
 

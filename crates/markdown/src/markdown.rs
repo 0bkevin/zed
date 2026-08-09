@@ -544,7 +544,7 @@ actions!(
     ]
 );
 
-/// Converts Markdown into an HTML fragment suitable for a rich-text clipboard.
+/// Converts Markdown into a semantic HTML fragment suitable for a rich-text clipboard.
 pub fn markdown_to_html(markdown: &str) -> String {
     let mut html = String::new();
     pulldown_cmark::html::push_html(
@@ -1031,6 +1031,7 @@ impl Markdown {
         }
         self.source = source;
         self.selection = Selection::default();
+        self.select_all_requested = false;
         self.autoscroll_request = None;
         self.pending_autoscroll = None;
         self.pending_parse = None;
@@ -1151,26 +1152,14 @@ impl Markdown {
     }
 
     fn copy_as_html(&mut self, text: &RenderedText, _: &mut Window, cx: &mut Context<Self>) {
-        let (plain_text, markdown) = match self.context_menu_selected_markdown.take() {
-            Some(markdown) => {
-                let plain_text = self
-                    .context_menu_selected_text
-                    .take()
-                    .unwrap_or_else(|| markdown.clone());
-                (plain_text.to_string(), markdown.to_string())
-            }
-            None => {
-                if self.selection.end <= self.selection.start {
-                    return;
-                }
-                let range = self.selection.start..self.selection.end;
-                (
-                    text.text_for_range(range.clone()),
-                    self.parsed_markdown
-                        .rebalanced_markdown_for_selection(range),
-                )
-            }
-        };
+        if self.selection.end <= self.selection.start {
+            return;
+        }
+        let range = self.selection.start..self.selection.end;
+        let plain_text = text.text_for_range(range.clone());
+        let markdown = self
+            .parsed_markdown
+            .rebalanced_markdown_for_selection(range);
         cx.write_to_clipboard(ClipboardItem::new_html(
             plain_text,
             markdown_to_html(&markdown),
@@ -3175,7 +3164,10 @@ impl Element for MarkdownElement {
         }
         let mut rendered_markdown = builder.build();
         self.markdown.update(cx, |markdown, cx| {
-            if markdown.select_all_requested {
+            if markdown.select_all_requested
+                && markdown.pending_parse.is_none()
+                && markdown.parsed_markdown.source() == markdown.source()
+            {
                 markdown.select_all_requested = false;
                 markdown.selection.set_head(0, &rendered_markdown.text);
                 markdown.selection.pending = false;
@@ -5538,6 +5530,7 @@ mod tests {
     #[gpui::test]
     fn test_select_all_action_selects_the_source(cx: &mut TestAppContext) {
         let markdown = cx.new(|cx| Markdown::new("# Heading\n\nBody".into(), None, None, cx));
+        cx.run_until_parked();
         markdown.update(cx, |markdown, cx| markdown.select_all(cx));
 
         assert_eq!(
@@ -5546,6 +5539,93 @@ mod tests {
                 .map(str::to_owned)),
             Some("# Heading\n\nBody".to_owned())
         );
+    }
+
+    #[gpui::test]
+    fn test_select_all_waits_for_the_current_parse(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let source = "# Heading\n\nBody";
+        let markdown = cx.new(|cx| Markdown::new(source.into(), None, None, cx));
+        cx.run_until_parked();
+        render_markdown_entity_in_view(markdown.clone(), MarkdownStyle::default(), None, cx);
+
+        markdown.update(cx, |markdown, cx| {
+            markdown.pending_parse = Some(Task::ready(()));
+            markdown.select_all(cx);
+        });
+        cx.run_until_parked();
+        assert!(markdown.read_with(cx, |markdown, _| markdown.select_all_requested));
+
+        markdown.update(cx, |markdown, cx| {
+            markdown.pending_parse = None;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(!markdown.read_with(cx, |markdown, _| markdown.select_all_requested));
+        assert_eq!(
+            markdown.read_with(cx, |markdown, _| markdown
+                .selected_source()
+                .map(str::to_owned)),
+            Some(source.to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn test_reset_cancels_a_pending_select_all(cx: &mut TestAppContext) {
+        let markdown = cx.new(|cx| Markdown::new("first".into(), None, None, cx));
+        cx.run_until_parked();
+
+        markdown.update(cx, |markdown, cx| {
+            markdown.select_all(cx);
+            markdown.reset("second".into(), cx);
+        });
+
+        markdown.read_with(cx, |markdown, _| {
+            assert!(!markdown.select_all_requested);
+            assert!(!markdown.has_selection());
+        });
+    }
+
+    #[gpui::test]
+    fn test_copy_as_html_uses_the_live_selection(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let markdown = cx.new(|cx| Markdown::new("first\n\nsecond".into(), None, None, cx));
+        cx.run_until_parked();
+        let rendered_text =
+            render_markdown_entity_in_view(markdown.clone(), MarkdownStyle::default(), None, cx);
+
+        markdown.update(cx, |markdown, _| {
+            markdown.selection = Selection {
+                start: 0,
+                end: 5,
+                ..Default::default()
+            };
+            markdown.capture_for_context_menu(None, Some(&rendered_text));
+            markdown.selection = Selection {
+                start: 7,
+                end: 13,
+                ..Default::default()
+            };
+        });
+        let window = cx
+            .windows()
+            .into_iter()
+            .next()
+            .expect("the rendered Markdown should have a window");
+        window
+            .update(cx, |_, window, cx| {
+                markdown.update(cx, |markdown, cx| {
+                    markdown.copy_as_html(&rendered_text, window, cx)
+                });
+            })
+            .expect("the rendered Markdown window should still exist");
+
+        let clipboard = cx
+            .read_from_clipboard()
+            .expect("copying rich text should write to the clipboard");
+        assert_eq!(clipboard.text().as_deref(), Some("second"));
+        assert_eq!(clipboard.html(), Some("<p>second</p>\n"));
     }
 
     fn nbsp(n: usize) -> String {
