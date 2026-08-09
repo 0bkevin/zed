@@ -478,6 +478,7 @@ pub struct Markdown {
     context_menu_selected_markdown: Option<SharedString>,
     search_highlights: Vec<Range<usize>>,
     active_search_highlight: Option<usize>,
+    select_all_requested: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -537,9 +538,21 @@ actions!(
         /// Copies the selected text to the clipboard.
         Copy,
         /// Copies the selected text as markdown to the clipboard.
-        CopyAsMarkdown
+        CopyAsMarkdown,
+        /// Copies the selected text as rich text to the clipboard.
+        CopyAsHtml
     ]
 );
+
+/// Converts Markdown into an HTML fragment suitable for a rich-text clipboard.
+pub fn markdown_to_html(markdown: &str) -> String {
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(
+        &mut html,
+        pulldown_cmark::Parser::new_ext(markdown, parser::PARSE_OPTIONS),
+    );
+    html
+}
 
 enum EscapeAction {
     PassThrough,
@@ -673,6 +686,7 @@ impl Markdown {
             context_menu_selected_markdown: None,
             search_highlights: Vec::new(),
             active_search_highlight: None,
+            select_all_requested: false,
         };
         this.parse(cx);
         this
@@ -1054,6 +1068,18 @@ impl Markdown {
         self.selection.end > self.selection.start
     }
 
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection = Selection {
+            start: 0,
+            end: self.source.len(),
+            reversed: false,
+            pending: false,
+            mode: SelectMode::All,
+        };
+        self.select_all_requested = true;
+        cx.notify();
+    }
+
     pub fn selected_source(&self) -> Option<&str> {
         if self.selection.end <= self.selection.start {
             return None;
@@ -1122,6 +1148,33 @@ impl Markdown {
             .parsed_markdown
             .rebalanced_markdown_for_selection(self.selection.start..self.selection.end);
         cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn copy_as_html(&mut self, text: &RenderedText, _: &mut Window, cx: &mut Context<Self>) {
+        let (plain_text, markdown) = match self.context_menu_selected_markdown.take() {
+            Some(markdown) => {
+                let plain_text = self
+                    .context_menu_selected_text
+                    .take()
+                    .unwrap_or_else(|| markdown.clone());
+                (plain_text.to_string(), markdown.to_string())
+            }
+            None => {
+                if self.selection.end <= self.selection.start {
+                    return;
+                }
+                let range = self.selection.start..self.selection.end;
+                (
+                    text.text_for_range(range.clone()),
+                    self.parsed_markdown
+                        .rebalanced_markdown_for_selection(range),
+                )
+            }
+        };
+        cx.write_to_clipboard(ClipboardItem::new_html(
+            plain_text,
+            markdown_to_html(&markdown),
+        ));
     }
 
     fn capture_for_context_menu(
@@ -2171,6 +2224,7 @@ impl MarkdownElement {
                                 let blocked = handler(source_index, event.click_count, window, cx);
                                 if blocked {
                                     markdown.selection = Selection::default();
+                                    markdown.select_all_requested = false;
                                     markdown.pressed_link = None;
                                     window.prevent_default();
                                     cx.notify();
@@ -2216,6 +2270,7 @@ impl MarkdownElement {
                                 pending: true,
                                 mode,
                             };
+                            markdown.select_all_requested = false;
                             window.focus(&markdown.focus_handle, cx);
                         }
 
@@ -2224,6 +2279,7 @@ impl MarkdownElement {
                     }
                 } else if phase.capture() && event.button == MouseButton::Left {
                     markdown.selection = Selection::default();
+                    markdown.select_all_requested = false;
                     markdown.pressed_link = None;
                     cx.notify();
                 }
@@ -3118,6 +3174,14 @@ impl Element for MarkdownElement {
                 .update(cx, |markdown, _| markdown.clear_code_block_scroll_handles());
         }
         let mut rendered_markdown = builder.build();
+        self.markdown.update(cx, |markdown, cx| {
+            if markdown.select_all_requested {
+                markdown.select_all_requested = false;
+                markdown.selection.set_head(0, &rendered_markdown.text);
+                markdown.selection.pending = false;
+                cx.notify();
+            }
+        });
         #[cfg(test)]
         if let Some(on_render) = self.on_render.as_ref() {
             on_render(rendered_markdown.text.clone());
@@ -3174,6 +3238,16 @@ impl Element for MarkdownElement {
             move |_, phase, window, cx| {
                 if phase == DispatchPhase::Bubble {
                     entity.update(cx, move |this, cx| this.copy_as_markdown(window, cx))
+                }
+            }
+        });
+        window.on_action(std::any::TypeId::of::<crate::CopyAsHtml>(), {
+            let entity = self.markdown.clone();
+            let text = rendered_markdown.text.clone();
+            move |_, phase, window, cx| {
+                let text = text.clone();
+                if phase == DispatchPhase::Bubble {
+                    entity.update(cx, move |this, cx| this.copy_as_html(&text, window, cx))
                 }
             }
         });
@@ -5451,6 +5525,26 @@ mod tests {
         assert_eq!(
             selected_text,
             "Hello world\nThis is a test\nwith multiple lines"
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_html() {
+        let html = markdown_to_html("# Heading\n\n**bold**");
+        assert!(html.contains("<h1>Heading</h1>"));
+        assert!(html.contains("<p><strong>bold</strong></p>"));
+    }
+
+    #[gpui::test]
+    fn test_select_all_action_selects_the_source(cx: &mut TestAppContext) {
+        let markdown = cx.new(|cx| Markdown::new("# Heading\n\nBody".into(), None, None, cx));
+        markdown.update(cx, |markdown, cx| markdown.select_all(cx));
+
+        assert_eq!(
+            markdown.read_with(cx, |markdown, _| markdown
+                .selected_source()
+                .map(str::to_owned)),
+            Some("# Heading\n\nBody".to_owned())
         );
     }
 

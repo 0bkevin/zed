@@ -47,7 +47,7 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
-use gpui::{ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -77,7 +77,7 @@ x11rb::atom_manager! {
         TEXT,
         TEXT_MIME_UNKNOWN: b"text/plain",
 
-        // HTML: b"text/html",
+        HTML_MIME: b"text/html",
         // URI_LIST: b"text/uri-list",
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
@@ -987,6 +987,40 @@ impl Clipboard {
             bytes: message.into_owned().into_bytes(),
             format: self.inner.atoms.UTF8_STRING,
         }];
+        self.inner.write(data, selection, wait)
+    }
+
+    pub(crate) fn set_item(
+        &self,
+        item: &ClipboardItem,
+        selection: ClipboardKind,
+        wait: WaitConfig,
+    ) -> Result<()> {
+        if item.entries().len() == 1
+            && let Some(ClipboardEntry::String(text)) = item.entries().first()
+        {
+            return self.set_text(Cow::Owned(text.text().to_owned()), selection, wait);
+        }
+        let mut data = Vec::new();
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::String(text) => data.push(ClipboardData {
+                    bytes: text.text().as_bytes().to_owned(),
+                    format: self.inner.atoms.UTF8_STRING,
+                }),
+                ClipboardEntry::Html(html) => data.push(ClipboardData {
+                    bytes: html.as_bytes().to_owned(),
+                    format: self.inner.atoms.HTML_MIME,
+                }),
+                ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_) => {}
+            }
+        }
+        if data.is_empty() {
+            data.push(ClipboardData {
+                bytes: Vec::new(),
+                format: self.inner.atoms.UTF8_STRING,
+            });
+        }
         self.inner.write(data, selection, wait)
     }
 

@@ -28,6 +28,8 @@ static CLIPBOARD_HASH_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal text hash")));
 static CLIPBOARD_METADATA_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("GPUI internal metadata")));
+static CLIPBOARD_HTML_FORMAT: LazyLock<u32> =
+    LazyLock::new(|| register_clipboard_format(windows::core::w!("HTML Format")));
 static CLIPBOARD_SVG_FORMAT: LazyLock<u32> =
     LazyLock::new(|| register_clipboard_format(windows::core::w!("image/svg+xml")));
 static CLIPBOARD_GIF_FORMAT: LazyLock<u32> =
@@ -77,6 +79,7 @@ pub(crate) fn write_to_clipboard(item: ClipboardItem) {
         for entry in item.entries() {
             match entry {
                 ClipboardEntry::String(string) => write_string(string)?,
+                ClipboardEntry::Html(html) => write_html(html)?,
                 ClipboardEntry::Image(image) => write_image(image)?,
                 ClipboardEntry::ExternalPaths(_) => {}
             }
@@ -189,6 +192,60 @@ fn write_string(item: &ClipboardString) -> Result<()> {
         set_clipboard_bytes(&wide, *CLIPBOARD_METADATA_FORMAT)?;
     }
     Ok(())
+}
+
+fn write_html(html: &str) -> Result<()> {
+    set_clipboard_bytes(&html_clipboard_bytes(html), *CLIPBOARD_HTML_FORMAT)
+}
+
+fn html_clipboard_bytes(html: &str) -> Vec<u8> {
+    let header_template = "Version:1.0\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n";
+    let html_prefix = "<html><body>";
+    let fragment_start = "<!--StartFragment-->";
+    let fragment_end = "<!--EndFragment-->";
+    let body = format!("{html_prefix}{fragment_start}{html}{fragment_end}</body></html>");
+    let start_html = header_template.len();
+    let end_html = start_html + body.len();
+    let start_fragment = start_html + html_prefix.len() + fragment_start.len();
+    let end_fragment = start_fragment + html.len();
+    let header = format!(
+        "Version:1.0\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n"
+    );
+    debug_assert_eq!(header.len(), header_template.len());
+
+    let mut bytes = format!("{header}{body}").into_bytes();
+    bytes.push(0);
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_clipboard_offsets_are_utf8_byte_offsets() {
+        let html = "<p>Héllo</p>";
+        let bytes = html_clipboard_bytes(html);
+        let contents = std::str::from_utf8(&bytes[..bytes.len() - 1]).unwrap();
+
+        let offset = |name: &str| {
+            contents
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        };
+        let start_html = offset("StartHTML:");
+        let end_html = offset("EndHTML:");
+        let start_fragment = offset("StartFragment:");
+        let end_fragment = offset("EndFragment:");
+
+        assert_eq!(&bytes[start_fragment..end_fragment], html.as_bytes());
+        assert_eq!(&bytes[start_html..start_html + "<html>".len()], b"<html>");
+        assert_eq!(&bytes[end_html - "</html>".len()..end_html], b"</html>");
+        assert_eq!(bytes.last(), Some(&0));
+    }
 }
 
 fn write_image(item: &Image) -> Result<()> {

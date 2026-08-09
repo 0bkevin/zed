@@ -173,6 +173,7 @@
   {
     "context": "Markdown",
     "bindings": {
+      "ctrl-a": "editor::SelectAll",
       "copy": "markdown::Copy",
       "ctrl-insert": "markdown::Copy",
       "ctrl-c": "markdown::Copy",
@@ -1336,6 +1337,7 @@
   {
     "context": "MarkdownPreview",
     "bindings": {
+      "ctrl-a": "editor::SelectAll",
       "pageup": "markdown::ScrollPageUp",
       "pagedown": "markdown::ScrollPageDown",
       "up": "markdown::ScrollUp",

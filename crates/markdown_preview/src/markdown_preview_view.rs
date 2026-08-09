@@ -11,6 +11,7 @@ use editor::items::open_resolved_target;
 use editor::scroll::Autoscroll;
 use editor::{
     Editor, EditorEvent, EditorSettingsScrollbarProxy, MultiBufferOffset, SelectionEffects,
+    actions::SelectAll,
 };
 use gpui::{
     App, ClipboardItem, Context, Entity, EventEmitter, FocusHandle, Focusable, ImageSource,
@@ -782,6 +783,12 @@ impl MarkdownPreviewView {
         let offset = self.scroll_handle.offset();
         self.scroll_handle
             .set_offset(point(offset.x, offset.y - distance));
+    }
+
+    fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.markdown
+            .update(cx, |markdown, cx| markdown.select_all(cx));
+        window.focus(&self.markdown.read(cx).focus_handle(cx), cx);
     }
 
     fn scroll_page_up(&mut self, _: &ScrollPageUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1590,6 +1597,7 @@ impl Render for MarkdownPreviewView {
             .on_action(cx.listener(MarkdownPreviewView::increase_font_size))
             .on_action(cx.listener(MarkdownPreviewView::decrease_font_size))
             .on_action(cx.listener(MarkdownPreviewView::reset_font_size))
+            .on_action(cx.listener(MarkdownPreviewView::select_all))
             .w_full()
             .flex_1()
             .min_h_0()
@@ -1619,6 +1627,7 @@ impl Render for MarkdownPreviewView {
                                         markdown.context_menu_selected_text().cloned();
                                     let selected_markdown =
                                         markdown.context_menu_selected_markdown().cloned();
+                                    let selected_text_for_html = selected_text.clone();
                                     if context_menu_link.is_none()
                                         && selected_text.is_none()
                                         && selected_markdown.is_none()
@@ -1641,13 +1650,35 @@ impl Render for MarkdownPreviewView {
                                                 )
                                             })
                                             .when_some(selected_markdown, |menu, text| {
+                                                let selected_text_for_html =
+                                                    selected_text_for_html.clone();
                                                 menu.entry(
                                                     "Copy as Markdown",
                                                     Some(Box::new(markdown::CopyAsMarkdown)),
+                                                    {
+                                                        let text = text.clone();
+                                                        move |_, cx| {
+                                                            cx.write_to_clipboard(
+                                                                ClipboardItem::new_string(
+                                                                    text.to_string(),
+                                                                ),
+                                                            );
+                                                        }
+                                                    },
+                                                )
+                                                .entry(
+                                                    "Copy as Rich Text",
+                                                    Some(Box::new(markdown::CopyAsHtml)),
                                                     move |_, cx| {
+                                                        let plain_text = selected_text_for_html
+                                                            .as_ref()
+                                                            .unwrap_or(&text);
                                                         cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(
-                                                                text.to_string(),
+                                                            ClipboardItem::new_html(
+                                                                plain_text.to_string(),
+                                                                markdown::markdown_to_html(
+                                                                    text.as_ref(),
+                                                                ),
                                                             ),
                                                         );
                                                     },
@@ -1994,7 +2025,8 @@ mod tests {
     use editor::Editor;
     use fs::FakeFs;
     use gpui::{
-        AppContext as _, Entity, Focusable as _, Modifiers, TestAppContext, WindowHandle, px,
+        AppContext as _, Entity, Focusable as _, KeyBinding, Modifiers, TestAppContext,
+        WindowHandle, px,
     };
     use language::{Buffer, DiskState, Point};
     use project::Project;
@@ -2738,6 +2770,48 @@ mod tests {
 
         assert_editor_is_active_and_focused(cx, &multi_workspace, &editor);
         assert_no_markdown_preview_items(cx, &multi_workspace);
+    }
+
+    #[gpui::test]
+    async fn select_all_and_copy_as_rich_text(cx: &mut TestAppContext) {
+        let (multi_workspace, _) = open_markdown_file(cx, "note.md", "# Note\n\nBody text").await;
+        let preview = open_preview_for_active_editor(cx, &multi_workspace);
+        cx.run_until_parked();
+
+        let window: gpui::AnyWindowHandle = multi_workspace.into();
+        let select_all_keystroke = if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        };
+        cx.update(|cx| {
+            cx.bind_keys([
+                KeyBinding::new(
+                    select_all_keystroke,
+                    editor::actions::SelectAll,
+                    Some("MarkdownPreview"),
+                ),
+                KeyBinding::new(
+                    select_all_keystroke,
+                    editor::actions::SelectAll,
+                    Some("Markdown"),
+                ),
+            ])
+        });
+        cx.simulate_keystrokes(window, select_all_keystroke);
+
+        let markdown = preview.read_with(cx, |preview, _| preview.markdown.clone());
+        assert_eq!(
+            cx.update(|cx| markdown.read(cx).selected_source().map(str::to_owned)),
+            Some("# Note\n\nBody text".to_owned())
+        );
+
+        cx.dispatch_action(window, markdown::CopyAsHtml);
+        let clipboard = cx
+            .read_from_clipboard()
+            .expect("copying rich text should write to the clipboard");
+        assert_eq!(clipboard.text().as_deref(), Some("Note\nBody text"));
+        assert_eq!(clipboard.html(), Some("<h1>Note</h1>\n<p>Body text</p>\n"));
     }
 
     #[gpui::test]

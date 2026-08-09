@@ -164,24 +164,26 @@ impl Pasteboard {
                     self.inner.clearContents();
                 }
                 [ClipboardEntry::String(string)] => {
+                    self.inner.clearContents();
                     self.write_plaintext(string);
                 }
                 [ClipboardEntry::Image(image)] => {
                     self.write_image(image);
                 }
+                [ClipboardEntry::Html(html)] => {
+                    self.inner.clearContents();
+                    self.write_html(html);
+                }
                 [ClipboardEntry::ExternalPaths(_)] => {}
                 _ => {
-                    // Agus NB: We're currently only writing string entries to the clipboard when we have more than one.
-                    //
-                    // This was the existing behavior before I refactored the outer clipboard code:
-                    // https://github.com/zed-industries/zed/blob/65f7412a0265552b06ce122655369d6cc7381dd6/crates/gpui/src/platform/mac/platform.rs#L1060-L1110
-                    //
-                    // Note how `any_images` is always `false`. We should fix that, but that's orthogonal to the refactor.
+                    // Alternate representations belong to one pasteboard item so consumers can
+                    // choose between them without losing editor-specific metadata.
 
                     let mut combined = ClipboardString {
                         text: String::new(),
                         metadata: None,
                     };
+                    let mut html = None;
 
                     for entry in item.entries {
                         match entry {
@@ -191,11 +193,16 @@ impl Pasteboard {
                                     combined.metadata = text.metadata;
                                 }
                             }
+                            ClipboardEntry::Html(value) => html = Some(value),
                             _ => {}
                         }
                     }
 
+                    self.inner.clearContents();
                     self.write_plaintext(&combined);
+                    if let Some(html) = html {
+                        self.write_html(&html);
+                    }
                 }
             }
         }
@@ -203,8 +210,6 @@ impl Pasteboard {
 
     fn write_plaintext(&self, string: &ClipboardString) {
         unsafe {
-            self.inner.clearContents();
-
             let text_bytes = NSData::dataWithBytes_length_(
                 nil,
                 string.text.as_ptr() as *const c_void,
@@ -230,6 +235,18 @@ impl Pasteboard {
                 self.inner
                     .setData_forType(metadata_bytes, *self.metadata_type);
             }
+        }
+    }
+
+    fn write_html(&self, html: &str) {
+        unsafe {
+            let html_bytes = NSData::dataWithBytes_length_(
+                nil,
+                html.as_ptr() as *const c_void,
+                html.len() as u64,
+            );
+            self.inner
+                .setData_forType(html_bytes, ns_string("public.html"));
         }
     }
 

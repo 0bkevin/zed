@@ -2268,11 +2268,13 @@ pub struct ClipboardItem {
     pub entries: Vec<ClipboardEntry>,
 }
 
-/// Either a ClipboardString or a ClipboardImage
+/// A value stored in a [`ClipboardItem`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClipboardEntry {
     /// A string entry
     String(ClipboardString),
+    /// An HTML entry
+    Html(String),
     /// An image entry
     Image(Image),
     /// A file entry
@@ -2284,6 +2286,16 @@ impl ClipboardItem {
     pub fn new_string(text: String) -> Self {
         Self {
             entries: vec![ClipboardEntry::String(ClipboardString::new(text))],
+        }
+    }
+
+    /// Create a new ClipboardItem with plain text and an HTML representation.
+    pub fn new_html(text: String, html: String) -> Self {
+        Self {
+            entries: vec![
+                ClipboardEntry::String(ClipboardString::new(text)),
+                ClipboardEntry::Html(html),
+            ],
         }
     }
 
@@ -2340,6 +2352,14 @@ impl ClipboardItem {
         } else {
             None
         }
+    }
+
+    /// Returns the first HTML entry in the item.
+    pub fn html(&self) -> Option<&str> {
+        self.entries.iter().find_map(|entry| match entry {
+            ClipboardEntry::Html(html) => Some(html.as_str()),
+            _ => None,
+        })
     }
 
     /// If this item is one ClipboardEntry::String, returns its metadata.
@@ -2399,6 +2419,19 @@ impl From<String> for ClipboardItem {
 impl From<Image> for ClipboardItem {
     fn from(value: Image) -> Self {
         Self::from(ClipboardEntry::from(value))
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn html_clipboard_item_keeps_plain_text_fallback() {
+        let item = ClipboardItem::new_html("Heading\n\nbold".into(), "<h1>Heading</h1>".into());
+
+        assert_eq!(item.text().as_deref(), Some("Heading\n\nbold"));
+        assert_eq!(item.html(), Some("<h1>Heading</h1>"));
     }
 }
 
